@@ -1,0 +1,15 @@
+# IDE
+.idea
+__pycache__
+venv
+test/*
+.aider*
+
+# testing
+.pytest_cache
+tmp
+
+# mac
+.DS_Store
+
+
