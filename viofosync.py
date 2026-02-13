@@ -342,8 +342,8 @@ def download_file(base_url, recording, destination, group_name):
 
     # Skip if already downloaded and size matches
     if os.path.exists(dest_filepath):
+        local_size = os.path.getsize(dest_filepath)
         if expected_size is not None:
-            local_size = os.path.getsize(dest_filepath)
             if local_size == expected_size:
                 logger.debug(
                     f"Skipping {recording.filename} "
@@ -352,7 +352,22 @@ def download_file(base_url, recording, destination, group_name):
                 return False, None
             # Size mismatch — re-download
             logger.info(
-                f"Size mismatch for {recording.filename}, "
+                f"Size mismatch for {recording.filename} "
+                f"({human_size(local_size)}/"
+                f"{human_size(expected_size)}), "
+                f"re-downloading"
+            )
+        elif recording.size is not None:
+            if local_size == recording.size:
+                logger.debug(
+                    f"Skipping {recording.filename} "
+                    f"({human_size(local_size)})"
+                )
+                return False, None
+            logger.info(
+                f"Size mismatch for {recording.filename} "
+                f"({human_size(local_size)}/"
+                f"{human_size(recording.size)}), "
                 f"re-downloading"
             )
         else:
