@@ -82,14 +82,14 @@ group_name_globs = {
 downloaded_filename_glob = (
     "[0-9][0-9][0-9][0-9]_[0-9][0-9][0-9][0-9]"
     "_[0-9][0-9][0-9][0-9][0-9][0-9]"
-    "_[0-9][0-9][0-9][0-9][0-9][0-9][FR].MP4"
+    "_*[FR].MP4"
 )
 
 # Downloaded recording filename regular expression
 downloaded_filename_re = re.compile(
     r"^(?P<year>\d{4})_(?P<month>\d{2})(?P<day>\d{2})"
     r"_(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})"
-    r"_(?P<sequence>\d{6})(?P<camera>[FR])\.MP4$",
+    r"_(?P<sequence>\d+)(?P<camera>.+)\.MP4$",
     re.IGNORECASE,
 )
 
@@ -97,7 +97,7 @@ downloaded_filename_re = re.compile(
 filename_re = re.compile(
     r"(?P<year>\d{4})_(?P<month>\d{2})(?P<day>\d{2})"
     r"_(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})"
-    r"_(?P<sequence>\d{5})(?P<camera>[FR])\.MP4",
+    r"_(?P<sequence>\d+)(?P<camera>.+)\.MP4",
     re.IGNORECASE,
 )
 
@@ -181,9 +181,7 @@ def get_dashcam_filenames(base_url):
 html_file_re = re.compile(
     r'<a href="(?P<filepath>[^"]+\.MP4)">'
     r'<b>(?P<filename>[^<]+)</b></a>'
-    r'<td align=right>\s*(?P<size>[\d.]+)\s*(?P<unit>[KMGT]?B)'
-    r'<td align=right>(?P<datetime>\d{4}/\d{2}/\d{2}'
-    r'\s+\d{2}:\d{2}:\d{2})',
+    r'<td align=right>\s*(?P<size>[\d.]+)\s*(?P<unit>[KMGT]?B)',
     re.IGNORECASE,
 )
 
@@ -245,9 +243,26 @@ def get_dashcam_filenames_html(base_url):
             size = parse_html_size(
                 m.group("size"), m.group("unit").upper()
             )
-            ts = parse_viofo_datetime(
-                m.group("datetime").strip()
+
+            # Always extract datetime from the filename
+            # (the actual recording timestamp)
+            fm = filename_re.search(filename)
+            if not fm:
+                logger.warning(
+                    f"Cannot parse date from filename: "
+                    f"{filename}, skipping"
+                )
+                continue
+
+            ts = datetime.datetime(
+                int(fm.group("year")),
+                int(fm.group("month")),
+                int(fm.group("day")),
+                int(fm.group("hour")),
+                int(fm.group("minute")),
+                int(fm.group("second")),
             )
+
             recordings.append(Recording(
                 filename, filepath, size, None, ts, None
             ))
