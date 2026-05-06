@@ -38,6 +38,7 @@ import re
 import shutil
 import socket
 import struct
+import sys
 import tempfile
 import time
 import urllib
@@ -47,9 +48,24 @@ import xml.etree.ElementTree as ET
 from collections import namedtuple
 
 # Logging
-logging.basicConfig(
-    format="%(asctime)s: %(levelname)s %(message)s"
-)
+
+def setup_logging(level):
+    root = logging.getLogger()
+
+    # IMPORTANT: remove all existing handlers (Docker-proof fix)
+    root.handlers.clear()
+    root.setLevel(logging.DEBUG)
+
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.DEBUG)
+
+    formatter = logging.Formatter(
+        "%(asctime)s: %(levelname)s %(message)s"
+    )
+    handler.setFormatter(formatter)
+
+    root.addHandler(handler)
+
 logger = logging.getLogger()
 cron_logger = logging.getLogger("cron")
 
@@ -1018,15 +1034,13 @@ def run():
     args = parse_args()
 
     if args.quiet:
-        logger.setLevel(logging.ERROR)
-        cron_logger.setLevel(logging.ERROR)
+        level = logging.ERROR
     elif args.cron:
-        logger.setLevel(logging.WARNING)
-        cron_logger.setLevel(logging.INFO)
+        level = logging.WARNING
     else:
-        logger.setLevel(
-            logging.DEBUG if args.verbose > 0 else logging.INFO
-        )
+        level = logging.DEBUG if args.verbose > 0 else logging.INFO
+
+    setup_logging(level)
 
     logger.info("Starting Viofo Sync")
 
