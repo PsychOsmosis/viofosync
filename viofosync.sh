@@ -28,7 +28,10 @@ quiet="${QUIET:+--quiet}"
 read_only="${READ_ONLY:+--read-only}"
 
 # cron option if CRON set to anything
-cron="${CRON:+--cron}"
+cron=""
+if [ "$CRON" = "1" ]; then
+    cron="--cron"
+fi
 
 # dry-run option if DRY_RUN set to anything
 dry_run="${DRY_RUN:+--dry-run}"
