@@ -49,24 +49,24 @@ from collections import namedtuple
 
 # Logging
 
-def setup_logging(level):
+def setup_logging():
     root = logging.getLogger()
 
-    # IMPORTANT: remove all existing handlers (Docker-proof fix)
-    root.handlers.clear()
+    while root.handlers:
+        root.removeHandler(root.handlers[0])
+
     root.setLevel(logging.DEBUG)
 
     handler = logging.StreamHandler(sys.stdout)
     handler.setLevel(logging.DEBUG)
 
-    formatter = logging.Formatter(
+    handler.setFormatter(logging.Formatter(
         "%(asctime)s: %(levelname)s %(message)s"
-    )
-    handler.setFormatter(formatter)
+    ))
 
     root.addHandler(handler)
 
-logger = logging.getLogger()
+logger = logging.getLogger("viofosync")
 cron_logger = logging.getLogger("cron")
 
 # Globals
@@ -1033,14 +1033,24 @@ def run():
 
     args = parse_args()
 
-    if args.quiet:
-        level = logging.ERROR
-    elif args.cron:
-        level = logging.WARNING
-    else:
-        level = logging.DEBUG if args.verbose > 0 else logging.INFO
+    setup_logging()
 
-    setup_logging(level)
+    if args.quiet:
+        logger.setLevel(logging.ERROR)
+        cron_logger.setLevel(logging.ERROR)
+
+    elif args.cron:
+        logger.setLevel(logging.WARNING)
+        cron_logger.setLevel(logging.INFO)
+
+    else:
+        level = (
+            logging.DEBUG if args.verbose > 0
+            else logging.INFO
+        )
+
+        logger.setLevel(level)
+        cron_logger.setLevel(level)
 
     logger.info("Starting Viofo Sync")
 
