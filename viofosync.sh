@@ -27,7 +27,7 @@ quiet="${QUIET:+--quiet}"
 # read_only option if READ_ONLY set to anything
 read_only="${READ_ONLY:+--read-only}"
 
-# cron option if CRON set to anything
+# cron option if CRON set to 1
 cron=""
 if [ "$CRON" = "1" ]; then
     cron="--cron"
