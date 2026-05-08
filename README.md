@@ -60,7 +60,7 @@ The following environment variables can be set to configure the behavior of the 
 | `DOWNLOAD_ATTEMPTS` | Number of attempts for each download (must be >= 1) | `1` |
 | `VERBOSE` | Logging verbosity level (0 = normal, 1+ = debug) | `0` |
 | `QUIET` | Set to any value to only log errors | |
-| `CRON` | Set to any value for reduced cron-mode logging | `1` |
+| `CRON` | Set to 1 for reduced cron-mode logging (DEFAULTS TO 1 IF UNSET) | `1` |
 | `GPS_EXTRACT` | Set to any value to extract GPS data and create `.gpx` files alongside recordings | |
 | `READ_ONLY` | Set to any value to only sync read-only (locked) recordings | |
 | `HTML` | Set to any value to use alternative HTML scraping instead of the XML API. Recommended for cameras that are slow or timeout responding to the XML file listing request | |
