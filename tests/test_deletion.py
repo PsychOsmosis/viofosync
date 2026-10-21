@@ -331,6 +331,8 @@ class SyncDeletionTests(CameraTestCase):
             url = request.full_url if isinstance(request, app.urllib.request.Request) else request
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(url).query)
             command = query.get("cmd", [None])[0]
+            if command == "3014":
+                return Response(b"<Cmd>2001</Cmd><Status>0</Status>")
             if command == "3015":
                 self.xml_requests.append(url)
                 if xml_error:
@@ -510,11 +512,11 @@ class SyncDeletionTests(CameraTestCase):
                 self.assertEqual(self.xml_requests, [])
                 self.assertEqual(self.deletes, [])
 
-    def test_html_adds_ro_directories_only_for_opt_in_and_respects_read_only(self):
+    def test_html_complete_snapshot_precedes_locked_selection(self):
         for locked, read_only, expected in [
-            (False, False, app.DCIM_DIRS),
+            (False, False, app.DCIM_DIRS + app.DCIM_DIRS_RO),
             (True, False, app.DCIM_DIRS + app.DCIM_DIRS_RO),
-            (True, True, app.DCIM_DIRS_RO),
+            (True, True, app.DCIM_DIRS + app.DCIM_DIRS_RO),
         ]:
             with self.subTest(locked=locked, read_only=read_only):
                 visited = []

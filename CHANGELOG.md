@@ -6,6 +6,8 @@
 * Preserve HTML sync and deletion with one XML metadata lookup per eligible sync, cached for all candidates. Use the exact unambiguous XML path and size; skip deletion when metadata or the local copy cannot be verified.
 * Send one fully encoded delete request per eligible file without path guessing or destructive retries, and pace camera HTTP requests at least one second apart, including failures.
 * Add standard-library tests using synthetic files and mocked camera responses for deletion flags, download failures, HTML metadata resolution, exact delete requests, dry-run safety, and request pacing.
+* Always defer the newest video capture during Wi-Fi sync while recording is active or unknown. Guard all camera channels, parking, and RO files from one complete listing snapshot before user filters; reassess on the next run without changing camera recording state.
+* Include timestamp-skewed companion lenses within the existing 10-second/3-sequence pairing limits. Read recording state once per nonempty snapshot, scan all five HTML directories before selection, and pace camera requests at least one second apart even after failures.
 
 ## 1.6.1 (2026-10-03)
 

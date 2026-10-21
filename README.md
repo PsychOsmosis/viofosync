@@ -61,6 +61,14 @@ environment:
   HTML: 1
 ```
 
+Wi-Fi sync always guards against downloading an active recording; no extra option is needed. Each run takes one complete file-list snapshot, then reads the camera's recording state once before applying file filters, age limits, download priority, stacked-file exclusions, or `READ_ONLY` selection. If the camera is recording or its state is unknown, the newest video capture is deferred across front, interior, and rear files, including parking and locked/RO recordings. Only an explicit stopped state makes that newest capture eligible.
+
+Capture groups use filename timestamps rather than sequence numbers or lens/mode suffixes. When companion cameras have slightly different timestamps, the existing pairing limits also defer other lenses in the same mode within 10 seconds and 3 sequence numbers of the newest capture. Photos do not supersede an active video. Nonstandard XML video names use the listing timestamp.
+
+The snapshot is not refreshed during the run. The next run reassesses the newest capture, so a previously deferred group becomes eligible when a newer capture appears or the camera explicitly reports that recording has stopped. The script does not start, stop, or pause camera recording. Existing download verification and deletion options still apply to eligible files.
+
+HTML mode now visits all five normal, parking, photo, and RO directory pages to identify the newest capture before selecting files. Normal HTML sync still excludes RO files unless selected by `READ_ONLY` or included with `DELETE_LOCKED=1`. Camera requests, including listing, status, HEAD, downloads, and deletion, start at least one second apart, including after a failed request.
+
 ## Local Import
 
 Use this when you remove the SD card or SSD and mount it on the NAS or another machine connected to the NAS.
@@ -269,6 +277,7 @@ Run the basic local checks:
 ```bash
 python3 -m unittest discover -s tests -v
 python3 -m py_compile viofosync.py
+python3 -m unittest discover -s tests -v
 bash -n entrypoint.sh
 bash -n viofosync.sh
 ```

@@ -219,6 +219,88 @@ def camera_control_request(url, timeout):
     return urllib.request.urlopen(url, timeout=timeout)
 
 
+def get_recording_state(base_url):
+    """Read cmd=3014 once: status 2001 is 0 stopped, 1 recording, else unknown.
+
+    Like RobXYZ/viofosync's record_state, accept the firmware's adjacent
+    Cmd/Status pairs even when its response has nonstandard XML roots.
+    Only an unambiguous explicit zero may release the newest capture.
+    """
+    try:
+        url = f"{base_url}/?custom=1&cmd=3014"
+        with camera_control_request(url, socket_timeout) as response:
+            if response.getcode() != 200:
+                return None
+            body = response.read().decode("utf-8")
+        values = re.findall(
+            r"<Cmd>\s*2001\s*</Cmd>\s*<Status>([^<]*)</Status>", body
+        )
+        commands = re.findall(r"<Cmd>\s*2001\s*</Cmd>", body)
+        if len(values) != len(commands):
+            return None
+        values = {value.strip() for value in values}
+        if values == {"0"}:
+            return 0
+        if values == {"1"}:
+            return 1
+    except Exception as e:
+        # A status failure must not prevent older recordings from syncing.
+        logger.warning(f"Cannot determine camera recording state: {e}")
+    return None
+
+
+def guard_active_recordings(base_url, recordings):
+    """Hold the newest video capture in this run's complete listing snapshot."""
+    if not recordings:
+        return recordings
+    state = get_recording_state(base_url)
+    if state == 0:
+        return recordings
+
+    # Lenses may have different sequence numbers; their filename timestamp
+    # identifies the capture, including P-prefixed parking and RO recordings.
+    # Photos must not supersede a video that could still be growing.
+    captures = {}
+    metadata = {}
+    for recording in recordings:
+        if not is_video_file(recording.filename):
+            continue
+        try:
+            info = parse_recording_filename(recording.filename)
+        except ValueError:
+            info = None
+        captures[id(recording)] = (
+            info["datetime"] if info else recording.datetime
+        )
+        metadata[id(recording)] = info
+    if not captures:
+        return recordings
+    newest = max(captures.values())
+    held = {key for key, stamp in captures.items() if stamp == newest}
+    anchors = [metadata[key] for key in held if metadata[key]]
+    # The existing stacker documents skew between lenses. Use its bounds,
+    # without requiring a complete F/I/R trio or matching storage directories.
+    for key, stamp in captures.items():
+        info = metadata[key]
+        if info and any(
+            info["camera"] != anchor["camera"]
+            and info["mode"] == anchor["mode"]
+            and abs(info["sequence"] - anchor["sequence"])
+                <= STACK_MAX_SEQUENCE_GAP
+            and (newest - stamp).total_seconds()
+                <= STACK_MAX_TIME_GAP_SECONDS
+            for anchor in anchors
+        ):
+            held.add(key)
+    eligible = [r for r in recordings if id(r) not in held]
+    logger.info(
+        f"Deferring {len(recordings) - len(eligible)} file(s) in newest "
+        f"capture {newest}: recording state "
+        f"{'active' if state == 1 else 'unknown'}"
+    )
+    return eligible
+
+
 def get_dashcam_filenames(base_url):
     """Gets the recording filenames from the Viofo dashcam."""
     try:
@@ -235,8 +317,6 @@ def get_dashcam_filenames(base_url):
         recordings = []
         for file_elem in root.findall(".//File"):
             attr = int(file_elem.find("ATTR").text)
-            if read_only and attr != 33:
-                continue
             name = file_elem.find("NAME").text
             filepath = file_elem.find("FPATH").text
             size = int(file_elem.find("SIZE").text)
@@ -298,8 +378,8 @@ def get_dashcam_filenames_html(base_url):
 
     Much faster than the XML API on cameras with many files.
     """
-    dirs = (DCIM_DIRS_RO if read_only else
-            DCIM_DIRS + (DCIM_DIRS_RO if delete_locked else []))
+    # Always take a complete snapshot before selecting the newest capture.
+    dirs = DCIM_DIRS + DCIM_DIRS_RO
     recordings = []
 
     for dir_path in dirs:
@@ -1797,6 +1877,20 @@ def sync(address, destination, grouping, download_priority,
     except (RuntimeError, UserWarning) as e:
         logger.error(f"Sync aborted: {e}")
         return False
+
+    dashcam_recordings = guard_active_recordings(base_url, dashcam_recordings)
+
+    if read_only:
+        dashcam_recordings = [
+            r for r in dashcam_recordings
+            if r.attr == 33 or local_file_is_locked(r.filepath or "")
+        ]
+    elif args.html and not delete_locked:
+        # Preserve HTML mode's normal-directory selection after the guard.
+        dashcam_recordings = [
+            r for r in dashcam_recordings
+            if not local_file_is_locked(r.filepath or "")
+        ]
 
     dashcam_recordings.sort(
         key=lambda r: r.datetime,
