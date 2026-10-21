@@ -58,6 +58,8 @@ cron_logger = logging.getLogger("cron")
 dry_run = False
 read_only = False
 delete_after_sync = False
+delete_locked = False
+_last_control_request_at = None
 max_disk_used_percent = 90
 cutoff_date = None
 socket_timeout = 10.0
@@ -206,20 +208,28 @@ def html_href_to_camera_path(dir_path, href):
     return f"A:{dir_path.rstrip('/')}/{filepath}"
 
 
+def camera_control_request(url, timeout):
+    """Pace camera HTTP requests at least one second apart, even on failure."""
+    global _last_control_request_at
+    if _last_control_request_at is not None:
+        wait = 1.0 - (time.monotonic() - _last_control_request_at)
+        if wait > 0:
+            time.sleep(wait)
+    _last_control_request_at = time.monotonic()
+    return urllib.request.urlopen(url, timeout=timeout)
+
+
 def get_dashcam_filenames(base_url):
     """Gets the recording filenames from the Viofo dashcam."""
     try:
         url = f"{base_url}/?custom=1&cmd=3015&par=1"
-        request = urllib.request.Request(url)
-        response = urllib.request.urlopen(request)
-
-        if response.getcode() != 200:
-            raise RuntimeError(
-                f"Error response from {base_url}; "
-                f"status code: {response.getcode()}"
-            )
-
-        xml_data = response.read().decode('utf-8')
+        with camera_control_request(url, socket_timeout) as response:
+            if response.getcode() != 200:
+                raise RuntimeError(
+                    f"Error response from {base_url}; "
+                    f"status code: {response.getcode()}"
+                )
+            xml_data = response.read().decode("utf-8")
         root = ET.fromstring(xml_data)
 
         recordings = []
@@ -288,13 +298,14 @@ def get_dashcam_filenames_html(base_url):
 
     Much faster than the XML API on cameras with many files.
     """
-    dirs = DCIM_DIRS_RO if read_only else DCIM_DIRS
+    dirs = (DCIM_DIRS_RO if read_only else
+            DCIM_DIRS + (DCIM_DIRS_RO if delete_locked else []))
     recordings = []
 
     for dir_path in dirs:
         url = f"{base_url}{dir_path}"
         try:
-            with urllib.request.urlopen(
+            with camera_control_request(
                 url, timeout=socket_timeout
             ) as resp:
                 if resp.getcode() != 200:
@@ -370,7 +381,7 @@ def get_filepath(destination, group_name, filename):
 def get_remote_size(url, timeout):
     """HEAD request to get Content-Length of a remote file."""
     req = urllib.request.Request(url, method="HEAD")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with camera_control_request(req, timeout=timeout) as resp:
         cl = resp.getheader("Content-Length")
     return int(cl) if cl and cl.isdigit() else None
 
@@ -471,7 +482,7 @@ def download_file(base_url, recording, destination, group_name):
         for attempt in range(1, max_download_attempts + 1):
             try:
                 start = time.perf_counter()
-                with urllib.request.urlopen(
+                with camera_control_request(
                     url, timeout=socket_timeout
                 ) as resp, open(tmp_path, "wb") as out:
                     shutil.copyfileobj(resp, out)
@@ -549,88 +560,73 @@ def verify_local_file(local_path, expected_size=None):
         return False
 
 
-def deletion_path_candidates(filepath):
-    """Returns possible path formats for Viofo delete commands."""
-    if not filepath:
-        return []
-
-    normalized = filepath.replace("\\", "/")
-    candidates = []
-
-    def add(path):
-        if path and path not in candidates:
-            candidates.append(path)
-
-    add(filepath)
-    add(normalized)
-
-    if re.match(r"^[A-Z]:/", normalized, re.IGNORECASE):
-        add(normalized.replace("/", "\\"))
-        return candidates
-
-    if normalized.startswith("/"):
-        for drive in ("A", "B"):
-            with_drive = f"{drive}:{normalized}"
-            add(with_drive)
-            add(with_drive.replace("/", "\\"))
-        return candidates
-
-    if "/" not in normalized:
-        for root in ("/DCIM/Movie", "/DCIM/Movie/Parking",
-                     "/DCIM/Photo"):
-            for drive in ("A", "B"):
-                with_drive = f"{drive}:{root}/{normalized}"
-                add(with_drive)
-                add(with_drive.replace("/", "\\"))
-
-    return candidates
+def is_exact_camera_path(filepath):
+    """Accept a drive-qualified DCIM path without rewriting or guessing it."""
+    if (not isinstance(filepath, str)
+            or not re.match(r"^[A-Za-z]:[\\/]", filepath)
+            or any(ord(char) < 32 or ord(char) == 127 for char in filepath)):
+        return False
+    parts = re.split(r"[\\/]", filepath[3:])
+    return (
+        len(parts) >= 3
+        and parts[0].upper() == "DCIM"
+        and parts[1].upper() in {"MOVIE", "PHOTO"}
+        and all(part and part not in {".", ".."} for part in parts)
+    )
 
 
-def delete_url_candidates(address, filepath):
-    """Builds delete request URLs with path/encoding variants."""
-    urls = []
+def resolve_html_deletion_metadata(base_url, recordings):
+    """Use one XML listing to supply unambiguous exact paths and sizes."""
+    try:
+        xml_recordings = get_dashcam_filenames(base_url)
+    except Exception as e:
+        logger.warning(
+            f"XML deletion metadata unavailable; preserving camera files: {e}"
+        )
+        return recordings
 
-    def add(path, safe):
-        encoded = urllib.parse.quote(path, safe=safe)
-        url = f"http://{address}/?custom=1&cmd=4003&str={encoded}"
-        if url not in urls:
-            urls.append(url)
+    def key(recording):
+        # Only a lookup key: the delete request always uses unchanged XML FPATH.
+        path = recording.filepath or ""
+        relative = re.sub(r"^[A-Za-z]:", "", path).replace("\\", "/")
+        return recording.filename, relative.lstrip("/")
 
-    for path in deletion_path_candidates(filepath):
-        add(path, "/")
-        add(path, "/:\\")
+    by_path = {}
+    for recording in xml_recordings:
+        by_path.setdefault(key(recording), []).append(recording)
 
-    return urls
+    resolved = []
+    for recording in recordings:
+        candidates = by_path.get(key(recording), [])
+        if len(candidates) == 1:
+            candidate = candidates[0]
+            if (is_exact_camera_path(candidate.filepath)
+                    and re.split(r"[\\/]", candidate.filepath)[-1]
+                    == candidate.filename
+                    and candidate.timecode is not None
+                    and isinstance(candidate.size, int) and candidate.size > 0):
+                resolved.append(candidate)
+                continue
+        resolved.append(recording)
+    return resolved
 
 
 def delete_from_camera(address, filepath, timeout):
-    """Requests deletion of filepath on the camera via the XML API.
+    """Delete only the exact XML FPATH; never try alternate paths or encodings.
 
-    Returns True when the camera responds HTTP 200 with Status 0,
-    raises on connection/parse errors.
+    Returns True for HTTP 200 with Status 0. Connection/parse errors propagate
+    to the existing per-recording warning handler, without a destructive retry.
     """
-    last_error = None
-    had_response = False
-    for url in delete_url_candidates(address, filepath):
-        try:
-            with urllib.request.urlopen(url, timeout=timeout) as resp:
-                if resp.getcode() != 200:
-                    continue
-                xml_data = resp.read().decode("utf-8")
-            root = ET.fromstring(xml_data)
-            had_response = True
-        except Exception as e:
-            last_error = e
-            logger.debug(f"Delete request variant failed: {e}")
-            continue
-        status_elem = root.find(".//Status")
-        if (status_elem is not None
-                and status_elem.text.strip() == "0"):
-            return True
-
-    if last_error and not had_response:
-        raise last_error
-    return False
+    if not is_exact_camera_path(filepath):
+        return False
+    encoded = urllib.parse.quote(filepath, safe="")
+    url = f"http://{address}/?custom=1&cmd=4003&str={encoded}"
+    with camera_control_request(url, timeout) as resp:
+        if resp.getcode() != 200:
+            return False
+        root = ET.fromstring(resp.read().decode("utf-8"))
+    status = root.find(".//Status")
+    return status is not None and (status.text or "").strip() == "0"
 
 
 def get_downloaded_recordings(destination, grouping):
@@ -1726,32 +1722,42 @@ def stack_cameras(destination, grouping, encoder, bitrate,
 
 
 def _handle_camera_deletion(address, recording, dest_path):
-    """Post-download deletion: verify local file then delete from camera."""
+    """Delete an eligible XML-verified recording after local verification."""
+    if not delete_after_sync:
+        return
+
     is_locked = (
-        (recording.filepath and local_file_is_locked(
-            recording.filepath
-        ))
+        (recording.filepath and local_file_is_locked(recording.filepath))
         or recording.attr == 33
     )
-    if is_locked:
+    if is_locked and not delete_locked:
         logger.info(
-            f"Skipping deletion of locked file: "
-            f"{recording.filename}"
+            f"Skipping deletion of locked file: {recording.filename}"
+        )
+        return
+
+    # Unresolved HTML metadata has a guessed drive and rounded size. Only an
+    # exact, unambiguous XML FPATH and size may authorize deletion in either mode.
+    if (recording.timecode is None
+            or not is_exact_camera_path(recording.filepath)
+            or re.split(r"[\\/]", recording.filepath)[-1] != recording.filename
+            or not isinstance(recording.size, int) or recording.size <= 0):
+        logger.warning(
+            f"Skipping camera deletion for {recording.filename}: "
+            "exact XML path and size unavailable"
         )
         return
 
     if dry_run:
         logger.info(
-            f"[DRY RUN] Would delete from camera: "
-            f"{recording.filename}"
+            f"[DRY RUN] Would delete from camera: {recording.filename}"
         )
         return
 
-    if not verify_local_file(dest_path):
+    if not verify_local_file(dest_path, recording.size):
         logger.warning(
-            f"Failed to delete from camera: "
-            f"{recording.filename} "
-            f"(local file missing or empty)"
+            f"Failed to delete from camera: {recording.filename} "
+            "(local file missing, empty or size changed)"
         )
         return
 
@@ -1764,14 +1770,12 @@ def _handle_camera_deletion(address, recording, dest_path):
             )
         else:
             logger.warning(
-                f"Failed to delete from camera: "
-                f"{recording.filename} "
-                f"(camera returned error)"
+                f"Failed to delete from camera: {recording.filename} "
+                "(camera returned error)"
             )
     except Exception as e:
         logger.warning(
-            f"Failed to delete from camera: "
-            f"{recording.filename} ({e})"
+            f"Failed to delete from camera: {recording.filename} ({e})"
         )
 
 
@@ -1809,6 +1813,19 @@ def sync(address, destination, grouping, download_priority,
         )
 
     stacked_names = load_stacked_names(destination)
+    if args.html and delete_after_sync:
+        eligible = [
+            r for r in dashcam_recordings
+            if (not cutoff_date or r.datetime.date() >= cutoff_date)
+            and r.filename not in stacked_names
+            and (delete_locked or not local_file_is_locked(r.filepath or ""))
+        ]
+        if eligible:
+            resolved = resolve_html_deletion_metadata(base_url, eligible)
+            replacements = {id(old): new for old, new in zip(eligible, resolved)}
+            dashcam_recordings = [
+                replacements.get(id(r), r) for r in dashcam_recordings
+            ]
     total = len(dashcam_recordings)
     for i, recording in enumerate(dashcam_recordings, start=1):
         if cutoff_date and recording.datetime.date() < cutoff_date:
@@ -1837,7 +1854,7 @@ def sync(address, destination, grouping, download_priority,
             if (args.gps_extract and not dry_run
                     and is_video_file(recording.filename)):
                 extract_gps_data(dest_path)
-        if delete_after_sync and (verified or dry_run):
+        if delete_after_sync and (dry_run or (local_available and verified)):
             _handle_camera_deletion(
                 address, recording, dest_path
             )
@@ -2221,8 +2238,13 @@ def parse_args():
     )
     parser.add_argument(
         "--delete-after-sync", action="store_true",
-        help="Delete files from camera after successful download "
-        "(skips locked/RO files)",
+        help="Delete verified files from camera "
+        "(locked/RO files require --delete-locked)",
+    )
+    parser.add_argument(
+        "--delete-locked", action="store_true",
+        help="Also delete verified locked/RO files; requires "
+        "--delete-after-sync",
     )
     parser.add_argument(
         "--import-source",
@@ -2315,7 +2337,7 @@ def parse_args():
 # --- Entry point ---
 
 def run():
-    global dry_run, read_only, delete_after_sync
+    global dry_run, read_only, delete_after_sync, delete_locked
     global max_disk_used_percent, cutoff_date, socket_timeout
     global max_download_attempts
 
@@ -2343,6 +2365,7 @@ def run():
         logger.info("READ ONLY mode: locked files only.")
 
     delete_after_sync = args.delete_after_sync
+    delete_locked = args.delete_locked
     if delete_after_sync:
         logger.info(
             "DELETE AFTER SYNC: camera files will be deleted "
