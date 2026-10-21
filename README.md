@@ -146,6 +146,58 @@ environment:
   DELETE_MERGED_SOURCES: 0
 ```
 
+### Preserve GPS in merged recordings
+
+GPS preservation is off by default. To retain the route inside merged MP4s:
+
+~~~yaml
+environment:
+  MERGE_CHUNKS: 1
+  MERGE_GPS: 1
+  MERGE_KEEP_GPX: 1
+  TZ: America/Montreal  # Must match the camera's local recording clock.
+~~~
+
+`MERGE_GPS=1` preserves the native VIOFO GPS index and original GPS records
+inside each merged MP4. It also embeds versioned GPX timing metadata, so a
+supporting viewer can follow positions across concatenated source clips.
+Video and audio remain stream copies; GPS preservation does not transcode
+them. Metadata is placed before the media payload, including for merged
+files larger than 4 GiB.
+
+`MERGE_KEEP_GPX=1` additionally retains the same merged GPX as
+`<merged-file>.MP4.gpx` beside the merged video. Its default is `0`: the
+metadata stays embedded in the MP4 and no merged GPX sidecar is retained.
+`MERGE_KEEP_GPX` has no effect without `MERGE_GPS`. `GPS_EXTRACT` is independent:
+it controls GPX extraction beside original recordings and is not required
+for merged GPS preservation.
+
+The merge verifies the embedded index and GPS records before publishing the
+output or deleting sources with `DELETE_MERGED_SOURCES=1`. If GPS metadata
+is malformed, incomplete, cannot fit safely, or cannot be written and
+verified, that merge is skipped and its source videos and sidecars are kept.
+Clips without GPS can still merge; they do not acquire invented positions.
+Supported bounds are 256 source clips, 12,000 native GPS records, 512 MiB of
+native GPS data and 2 MiB of merged GPX. Groups exceeding these limits keep
+their sources instead of publishing an incomplete route.
+Dry runs do not extract, embed, publish, or delete GPS data.
+
+Timing uses the actual concatenation durations and qualified source capture
+clocks. Set `TZ` to the camera's timezone. Uncertain clocks retain their route
+and original UTC times but are explicitly marked as having unavailable media
+timing. A viewer must not guess synchronized positions from those timestamps.
+Qualified playback GPX omits fixes just before a clip starts and keeps the first
+fix for a repeated GPS second or shared media boundary. Every original native
+GPS record remains embedded unchanged, including those omitted from timed GPX.
+Parking files remain unmerged. Existing merged files are left untouched;
+GPS already lost from deleted originals cannot be recovered by enabling this
+option.
+
+The native VIOFO data remains extractable by Viofosync. The additional
+`urn:viofosync:merge-gps:1` GPX extensions describe merged media timing;
+other players may ignore them. Compatibility with commercial viewers is
+not guaranteed.
+
 ## Optional Camera Stacking
 
 3-channel cameras (A329S etc.) can record front, interior and rear as separate
@@ -202,6 +254,8 @@ docker exec viofosync vainfo
 | `DELETE_AFTER_SYNC` | `0` | Set to `1` to delete verified files from the dashcam |
 | `MOVE_IMPORTED` | `0` | Set to `1` to move local import files instead of copying |
 | `MERGE_CHUNKS` | `0` | Set to `1` to merge normal driving chunks |
+| `MERGE_GPS` | `0` | Preserve native GPS and timing metadata inside merged MP4s |
+| `MERGE_KEEP_GPX` | `0` | With MERGE_GPS, also keep the merged .MP4.gpx sidecar |
 | `MERGE_GAP` | `2` | Allowed seconds between consecutive normal chunks |
 | `MERGED_DESTINATION` | `/recordings/merged` | Optional merged-file output folder |
 | `DELETE_MERGED_SOURCES` | `0` | Set to `1` to delete source chunks after a merge |

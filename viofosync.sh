@@ -92,6 +92,14 @@ if env_enabled "${MERGE_CHUNKS:-}"; then
     args+=(--merge-chunks)
 fi
 
+if env_enabled "${MERGE_GPS:-0}"; then
+    args+=(--merge-gps)
+fi
+
+if env_enabled "${MERGE_KEEP_GPX:-0}"; then
+    args+=(--merge-keep-gpx)
+fi
+
 if [[ -n ${MERGE_GAP:-} ]]; then
     args+=(--merge-gap "$MERGE_GAP")
 fi
