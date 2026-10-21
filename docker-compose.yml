@@ -56,6 +56,8 @@ services:
 
       # Normal-driving chunk merging. Parking files are not merged.
       MERGE_CHUNKS: 0
+      MERGE_GPS: 0
+      MERGE_KEEP_GPX: 0
       MERGE_GAP: 2
       MERGED_DESTINATION: ''
       DELETE_MERGED_SOURCES: 0

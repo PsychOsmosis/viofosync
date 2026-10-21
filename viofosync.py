@@ -1174,7 +1174,8 @@ def remove_recording_and_sidecars(filepath):
 
 
 def merge_recording_group(group, merged_destination,
-                          grouping, delete_sources):
+                          grouping, delete_sources, merge_gps=False,
+                          merge_keep_gpx=False):
     """Merges one chunk group with ffmpeg concat copy."""
     group_name = get_group_name(group[0].datetime, grouping)
     output_dir = (
@@ -1186,7 +1187,7 @@ def merge_recording_group(group, merged_destination,
     output_path = os.path.join(
         output_dir, merged_output_filename(group)
     )
-    if os.path.exists(output_path):
+    if os.path.lexists(output_path):
         logger.info(f"Merged file already exists: {output_path}")
         return False
 
@@ -1201,6 +1202,20 @@ def merge_recording_group(group, merged_destination,
         )
         return True
 
+    gps_plan = None
+    if merge_gps:
+        import merge_gps as gps_merger
+        try:
+            gps_plan = gps_merger.prepare(group)
+        except (OSError, ValueError, RuntimeError) as error:
+            logger.error("Cannot preserve merged GPS; keeping sources: %s", error)
+            return False
+
+    gpx_path = output_path + ".gpx"
+    if merge_gps and merge_keep_gpx and os.path.lexists(gpx_path):
+        logger.error("Merged GPX already exists; keeping sources: %s", gpx_path)
+        return False
+
     list_fd, list_path = tempfile.mkstemp(
         dir=output_dir, prefix=".concat-", suffix=".txt"
     )
@@ -1212,17 +1227,27 @@ def merge_recording_group(group, merged_destination,
     os.close(list_fd)
     os.close(tmp_fd)
 
+    tmp_gpx = None
+    published_gpx = False
     try:
         with open(list_path, "w") as list_file:
-            for recording in group:
+            for index, recording in enumerate(group):
                 list_file.write(concat_file_line(recording.filepath))
+                if gps_plan is not None:
+                    list_file.write(
+                        f"duration {gps_plan.concat_durations[index]}\n"
+                    )
 
+        command = [
+            "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-y", "-f", "concat", "-safe", "0",
+            "-i", list_path, "-c", "copy",
+        ]
+        if gps_plan is not None:
+            command.extend(["-moov_size", str(gps_plan.reserve_bytes)])
+        command.append(tmp_output)
         result = subprocess.run(
-            [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-y", "-f", "concat", "-safe", "0",
-                "-i", list_path, "-c", "copy", tmp_output,
-            ],
+            command,
             capture_output=True,
             text=True,
             check=False,
@@ -1238,7 +1263,30 @@ def merge_recording_group(group, merged_destination,
             logger.error(f"Merged file is empty: {tmp_output}")
             return False
 
-        os.replace(tmp_output, output_path)
+        if gps_plan is not None:
+            try:
+                gpx_content = gps_plan.embed_verify(tmp_output)
+                if merge_keep_gpx and gpx_content:
+                    gpx_fd, tmp_gpx = tempfile.mkstemp(
+                        dir=output_dir, prefix=".merged-gps-", suffix=".gpx"
+                    )
+                    with os.fdopen(gpx_fd, "wb") as gpx_file:
+                        gpx_file.write(gpx_content)
+                        gpx_file.flush()
+                        os.fsync(gpx_file.fileno())
+                    os.link(tmp_gpx, gpx_path)
+                    published_gpx = True
+            except (OSError, ValueError, RuntimeError) as error:
+                logger.error("Merged GPS verification failed; keeping sources: %s", error)
+                return False
+
+        try:
+            os.link(tmp_output, output_path)
+        except OSError:
+            if published_gpx:
+                os.unlink(gpx_path)
+                published_gpx = False
+            raise
         logger.info(
             f"Merged {len(group)} chunks into {output_path}"
         )
@@ -1249,8 +1297,8 @@ def merge_recording_group(group, merged_destination,
 
         return True
     finally:
-        for path in (list_path, tmp_output):
-            if os.path.exists(path):
+        for path in (list_path, tmp_output, tmp_gpx):
+            if path is not None and os.path.exists(path):
                 try:
                     os.remove(path)
                 except OSError:
@@ -1258,7 +1306,8 @@ def merge_recording_group(group, merged_destination,
 
 
 def merge_chunks(source, grouping, merged_destination,
-                 merge_gap, delete_sources):
+                 merge_gap, delete_sources, merge_gps=False,
+                 merge_keep_gpx=False):
     """Finds and merges sequential local chunks under source."""
     if shutil.which("ffmpeg") is None:
         raise RuntimeError("ffmpeg is required for --merge-chunks")
@@ -1303,7 +1352,8 @@ def merge_chunks(source, grouping, merged_destination,
     merged = 0
     for group in groups:
         if merge_recording_group(
-            group, merged_destination, grouping, delete_sources
+            group, merged_destination, grouping, delete_sources,
+            merge_gps, merge_keep_gpx,
         ):
             merged += 1
 
@@ -2168,39 +2218,65 @@ def get_gps_atom(gps_atom_info, f):
 
 
 def parse_moov(in_fh):
+    """Extract indexed native GPS, including movies with a 64-bit mdat."""
     gps_data = []
+    in_fh.seek(0, os.SEEK_END)
+    file_size = in_fh.tell()
+
+    def header(offset, end):
+        if offset + 8 > end:
+            return None
+        in_fh.seek(offset)
+        raw = in_fh.read(8)
+        if len(raw) != 8:
+            return None
+        size, kind = struct.unpack(">I4s", raw)
+        header_size = 8
+        if size == 1:
+            raw = in_fh.read(8)
+            if len(raw) != 8:
+                return None
+            size = struct.unpack(">Q", raw)[0]
+            header_size = 16
+        elif size == 0:
+            size = end - offset
+        if size < header_size or size > end - offset:
+            return None
+        return size, kind, header_size
+
     offset = 0
-    while True:
-        atom_size, atom_type = get_atom_info(in_fh.read(8))
-        if atom_size == 0:
+    while offset < file_size:
+        atom = header(offset, file_size)
+        if atom is None:
             break
-
-        if atom_type == 'moov':
-            sub_offset = offset + 8
-            while sub_offset < (offset + atom_size):
-                sub_atom_size, sub_atom_type = get_atom_info(
-                    in_fh.read(8)
-                )
-
-                if sub_atom_type == 'gps ':
-                    gps_offset = 16 + sub_offset
-                    in_fh.seek(gps_offset, 0)
-                    while gps_offset < (sub_offset
-                                        + sub_atom_size):
-                        data = get_gps_atom(
-                            get_gps_atom_info(in_fh.read(8)),
-                            in_fh,
-                        )
+        atom_size, atom_type, atom_header = atom
+        if atom_type == b"moov":
+            sub_offset = offset + atom_header
+            while sub_offset < offset + atom_size:
+                child = header(sub_offset, offset + atom_size)
+                if child is None:
+                    break
+                child_size, child_type, child_header = child
+                if child_type == b"gps ":
+                    entries_size = child_size - child_header - 8
+                    if entries_size < 0 or entries_size % 8:
+                        break
+                    index_offset = sub_offset + child_header + 8
+                    for entry_offset in range(
+                            index_offset, sub_offset + child_size, 8):
+                        in_fh.seek(entry_offset)
+                        raw = in_fh.read(8)
+                        if len(raw) != 8:
+                            break
+                        position, length = get_gps_atom_info(raw)
+                        if not 12 <= length <= 65536 or position > file_size - length:
+                            logger.warning("Skipping invalid GPS metadata entry")
+                            continue
+                        data = get_gps_atom((position, length), in_fh)
                         if data:
                             gps_data.append(data)
-                        gps_offset += 8
-                        in_fh.seek(gps_offset, 0)
-
-                sub_offset += sub_atom_size
-                in_fh.seek(sub_offset, 0)
-
+                sub_offset += child_size
         offset += atom_size
-        in_fh.seek(offset, 0)
     return gps_data
 
 
@@ -2368,6 +2444,14 @@ def parse_args():
         "--delete-merged-sources", action="store_true",
         help="Delete source chunks and sidecars after a successful "
         "merge",
+    )
+    parser.add_argument(
+        "--merge-gps", action="store_true",
+        help="Preserve native GPS metadata inside merged recordings",
+    )
+    parser.add_argument(
+        "--merge-keep-gpx", action="store_true",
+        help="Keep merged GPX after verified GPS embedding; requires --merge-gps",
     )
     parser.add_argument(
         "--stack-cameras", action="store_true",
@@ -2549,7 +2633,8 @@ def run():
             success = merge_chunks(
                 args.destination, args.grouping,
                 args.merged_destination, args.merge_gap,
-                args.delete_merged_sources,
+                args.delete_merged_sources, args.merge_gps,
+                args.merge_keep_gpx,
             )
     except Exception:
         logger.exception("An error occurred")
