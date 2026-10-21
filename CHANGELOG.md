@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## Unreleased
+
+* Add opt-in `DELETE_LOCKED` / `--delete-locked`, disabled by default and effective only with `DELETE_AFTER_SYNC` / `--delete-after-sync`.
+* Preserve HTML sync and deletion with one XML metadata lookup per eligible sync, cached for all candidates. Use the exact unambiguous XML path and size; skip deletion when metadata or the local copy cannot be verified.
+* Send one fully encoded delete request per eligible file without path guessing or destructive retries, and pace camera HTTP requests at least one second apart, including failures.
+* Add standard-library tests using synthetic files and mocked camera responses for deletion flags, download failures, HTML metadata resolution, exact delete requests, dry-run safety, and request pacing.
+
 ## 1.6.1 (2026-10-03)
 
 * Camera stacking pairs each front file with the nearest interior and rear file (within 10 seconds and 3 sequence numbers) instead of requiring the same timestamp and F/I/R order, so parking clips numbered I, F, R and snapshots stamped a few seconds apart are stacked too.

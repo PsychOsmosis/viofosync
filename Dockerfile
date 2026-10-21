@@ -31,6 +31,7 @@ ENV ADDRESS="" \
     READ_ONLY="0" \
     GPS_EXTRACT="0" \
     DELETE_AFTER_SYNC="0" \
+    DELETE_LOCKED="0" \
     DRY_RUN="0" \
     RUN_ONCE="0" \
     IMPORT_SOURCE="" \

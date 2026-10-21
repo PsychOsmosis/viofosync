@@ -80,6 +80,10 @@ if env_enabled "${DELETE_AFTER_SYNC:-}"; then
     args+=(--delete-after-sync)
 fi
 
+if env_enabled "${DELETE_LOCKED:-0}"; then
+    args+=(--delete-locked)
+fi
+
 if [[ -n ${IMPORT_SOURCE:-} ]]; then
     args+=(--import-source "$IMPORT_SOURCE")
 fi

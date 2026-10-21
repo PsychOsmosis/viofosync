@@ -105,16 +105,31 @@ Direct CLI usage:
 
 ## Optional Deletion From Dashcam
 
-Deletion is off by default.
-
-Enable it only when you trust the destination:
+Deletion is off by default. To delete unlocked camera files after verifying their local copies:
 
 ```yaml
 environment:
   DELETE_AFTER_SYNC: 1
+  DELETE_LOCKED: 0
 ```
 
-The script deletes a dashcam file only after the local copy has been verified. Locked/read-only recordings are skipped.
+Locked/read-only recordings (`ATTR=33` or an `RO` directory) remain protected by default. To include them, explicitly enable both options:
+
+```yaml
+environment:
+  DELETE_AFTER_SYNC: 1
+  DELETE_LOCKED: 1
+```
+
+`DELETE_LOCKED=1` alone does not enable deletion. The CLI equivalents are `--delete-after-sync` and `--delete-locked`. `DRY_RUN=1` / `--dry-run` logs proposed actions and never sends a delete command, even when both options are enabled.
+
+Deletion requires a positive exact XML file size, the camera's exact drive-qualified `FPATH`, and a local file that still matches that size immediately before deletion. This also permits deletion of an existing verified local copy. Missing, empty, incomplete, failed, changed, or unverified copies do not authorize deletion. Each eligible file receives one delete request using the unchanged XML path; there is no drive guessing, alternate-path probing, or immediate delete retry.
+
+`HTML=1` remains supported. When deletion is enabled and eligible files exist, one XML listing supplies exact metadata for all candidates in that sync. The resulting lookup is cached for that run, rather than requesting XML for each file. Matching uses the filename and relative DCIM path; the exact XML drive and path are retained for deletion. Missing or ambiguous matches, or a failed XML lookup, preserve normal HTML downloads and skip deletion. No XML lookup is added when deletion is disabled or all candidates are excluded by filters, retention, stacking, or locked-file protection.
+
+With `DELETE_LOCKED=1`, HTML mode scans both normal and `RO` directories. `READ_ONLY=1` still selects only locked recordings. Camera HTTP requests are spaced at least one second apart, including failed requests.
+
+The owner verified this mechanism on an A329T running firmware 2.2: an `ATTR=33` file on the external SSD under `B:\DCIM\Movie\RO` was deleted with `cmd=4003` using the unchanged, URL-encoded `FPATH` supplied by XML `cmd=3015`. Its disappearance was independently verified. The branch tests use synthetic files and mocked camera responses; they perform no new live deletion.
 
 ## Optional Clip Merging
 
@@ -199,7 +214,8 @@ docker exec viofosync vainfo
 | `HTML` | `0` | Set to `1` to list files from the dashcam HTML directory pages |
 | `READ_ONLY` | `0` | Set to `1` to sync only locked/read-only recordings |
 | `GPS_EXTRACT` | `0` | Set to `1` to write `.gpx` files beside recordings |
-| `DELETE_AFTER_SYNC` | `0` | Set to `1` to delete verified files from the dashcam |
+| `DELETE_AFTER_SYNC` | `0` | Set to `1` to delete verified unlocked files from the dashcam |
+| `DELETE_LOCKED` | `0` | Set to `1` to also delete verified locked files; requires `DELETE_AFTER_SYNC=1` |
 | `MOVE_IMPORTED` | `0` | Set to `1` to move local import files instead of copying |
 | `MERGE_CHUNKS` | `0` | Set to `1` to merge normal driving chunks |
 | `MERGE_GAP` | `2` | Allowed seconds between consecutive normal chunks |
@@ -251,16 +267,35 @@ DOCKER_PASSWORD
 Run the basic local checks:
 
 ```bash
+python3 -m unittest discover -s tests -v
 python3 -m py_compile viofosync.py
 bash -n entrypoint.sh
 bash -n viofosync.sh
 ```
 
-Build the image locally:
+The tests use synthetic files and mocked HTTP responses; they do not contact a dashcam or delete camera files.
+
+### Feature-branch image and deployment
+
+The published `latest` image is built from `main`; pushing a feature branch does not update it. From a checkout of `feature/delete-locked-recordings`, build a separate image tag:
 
 ```bash
-docker build -t viofosync:local .
+docker build -t viofosync:delete-locked .
 ```
+
+After operator approval to replace the running container, select that tag in the deployment configuration. Start with deletion disabled while checking the destination and logs:
+
+```yaml
+services:
+  viofosync:
+    image: viofosync:delete-locked
+    environment:
+      HTML: 1
+      DELETE_AFTER_SYNC: 0
+      DELETE_LOCKED: 0
+```
+
+Replacing or starting the deployed container and enabling camera deletion require explicit operator approval. Building and testing the branch do not perform those actions. Preserve the existing volumes, scheduling, merge, and stacking settings when preparing the deployment.
 
 ## License
 
