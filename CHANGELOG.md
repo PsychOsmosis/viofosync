@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## Unreleased
+
+* Always defer the newest video capture during Wi-Fi sync while recording is active or unknown. Guard all camera channels, parking, and RO files from one complete listing snapshot before user filters; reassess on the next run without changing camera recording state.
+* Include timestamp-skewed companion lenses within the existing 10-second/3-sequence pairing limits. Read recording state once per nonempty snapshot, scan all five HTML directories before selection, and pace camera requests at least one second apart even after failures.
+
 ## 1.6.1 (2026-10-03)
 
 * Camera stacking pairs each front file with the nearest interior and rear file (within 10 seconds and 3 sequence numbers) instead of requiring the same timestamp and F/I/R order, so parking clips numbered I, F, R and snapshots stamped a few seconds apart are stacked too.
