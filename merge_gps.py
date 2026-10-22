@@ -425,23 +425,26 @@ class MergeGPSPlan:
                     capture = record.fix[0]
                     offset = capture - source.capture_start_us
                     source_duration = source_end - source_start
-                    if (not -_SECOND <= offset <= source_duration + _SECOND
-                            or previous_capture is not None and capture < previous_capture):
+                    if previous_capture is not None and capture < previous_capture:
                         qualified = False
-                    elif offset >= 0 and capture != previous_capture:
-                        candidate = segment_start + min(source_duration, offset)
+                    elif 0 <= offset <= source_duration and capture != previous_capture:
+                        candidate = segment_start + offset
                         if candidate < 0 or candidate < previous or candidate > duration_us:
                             qualified = False
                         elif candidate > previous:
                             media_time = candidate
                             previous = candidate
                     # Native records remain complete. For a qualified playback
-                    # track only, omit pre-start fixes and retain the first fix
-                    # for a repeated clock second or coincident media boundary.
+                    # track only, omit out-of-video fixes and retain the first
+                    # fix for a repeated clock second or coincident boundary.
+                    # Even omitted fixes must not hide a backward capture clock.
                     previous_capture = capture
                 segment_times.append((record.fix, media_time))
             mapped.append(segment_times)
         if output_video is not None and cursor != len(output_video.samples):
+            qualified = False
+        if previous < 0:
+            # No eligible playback fix: preserve the complete untimed route.
             qualified = False
         ET.register_namespace("", GPX_NS)
         ET.register_namespace("vs", MERGE_NS)

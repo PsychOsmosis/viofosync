@@ -31,11 +31,11 @@ def movie(deltas=(1000, 1000), extra=b"", *, composition=None):
     return B(b"moov", B(b"mvhd", header) + B(b"trak", B(b"mdia", media)) + extra)
 
 
-def raw_fix(second, *, active=True):
+def raw_fix(second, *, active=True, latitude=100.0):
     clock = BASE + timedelta(seconds=second)
     payload = struct.pack("<6I4s4f", clock.hour, clock.minute, clock.second,
                           clock.year - 2000, clock.month, clock.day,
-                          b"ANE\0" if active else b"VNE\0", 100.0, 200.0, 3.0, 4.0)
+                          b"ANE\0" if active else b"VNE\0", latitude, 200.0, 3.0, 4.0)
     return B(b"free", b"GPS " + payload + bytes(20))
 
 
@@ -242,8 +242,9 @@ class MergeGPSMetadataTests(unittest.TestCase):
         _, status = marker(plan.embed_verify(path))
         self.assertEqual(status.get("timing"), "media")
 
-    def test_nonmonotonic_or_out_of_range_capture_clocks_are_static(self):
-        for seconds in ((1, 0), (30, 31), (-1, 0, 1, 1, 0, 2)):
+    def test_nonmonotonic_or_no_eligible_capture_clocks_are_static(self):
+        for seconds in ((1, 0), (30, 31), (-1, 0, 1, 1, 0, 2),
+                        (-7, -8, 0, 1), (0, 1, 602, 601)):
             with self.subTest(seconds=seconds):
                 recording = source(self.root / "a.mp4", seconds)
                 plan = gps.prepare([recording])
@@ -252,6 +253,70 @@ class MergeGPSMetadataTests(unittest.TestCase):
                 root, status = marker(plan.embed_verify(path))
                 self.assertEqual(status.get("timing"), "unavailable")
                 self.assertEqual(len(root.findall(f".//{{{gps.GPX_NS}}}trkpt")), len(seconds))
+
+    def test_stale_boundary_fixes_leave_a_moving_qualified_playback_track(self):
+        # Observed camera patterns: a -7-second leading fix and +602-second
+        # tail around a nominal 600-second video. Exact endpoints stay eligible.
+        for seconds in ((-7, -1, 0, 1, 599, 600),
+                        (1, 2, 599, 600, 601, 602),
+                        (-7, 0, 1, 599, 600, 602)):
+            with self.subTest(seconds=seconds):
+                records = [raw_fix(second, latitude=100.0 + i / 100)
+                           for i, second in enumerate(seconds)]
+                recording = source(self.root / "a.mp4", records,
+                                   deltas=(1000,) * 600)
+                before = Path(recording.filepath).read_bytes()
+                plan = gps.prepare([recording])
+                path = self.root / "merged.mp4"
+                media_pos, _ = output(path, plan.reserve_bytes,
+                                      deltas=(1000,) * 600)
+                media_before = path.read_bytes()[media_pos:]
+                root, status = marker(plan.embed_verify(path))
+                self.assertEqual(status.get("timing"), "media")
+                points = root.findall(f".//{{{gps.GPX_NS}}}trkpt")
+                times = [int(point.find(
+                    f"{{{gps.GPX_NS}}}extensions/{{{gps.MERGE_NS}}}media_time_us").text)
+                         for point in points]
+                self.assertEqual(times, [second * 1000000 for second in seconds
+                                         if 0 <= second <= 600])
+                self.assertEqual(len({point.get("lat") for point in points}),
+                                 len(points))
+                self.assertEqual([r.digest for r in native(path)],
+                                 [hashlib.sha256(raw).digest() for raw in records])
+                self.assertEqual(Path(recording.filepath).read_bytes(), before)
+                self.assertEqual(path.read_bytes()[media_pos:], media_before)
+
+    def test_no_eligible_boundary_fixes_keep_the_complete_untimed_route(self):
+        for seconds in ((-7, -1), (601, 602), (-7, -1, 601, 602)):
+            with self.subTest(seconds=seconds):
+                recording = source(self.root / "a.mp4", seconds,
+                                   deltas=(1000,) * 600)
+                plan = gps.prepare([recording])
+                path = self.root / "merged.mp4"
+                output(path, plan.reserve_bytes, deltas=(1000,) * 600)
+                root, status = marker(plan.embed_verify(path))
+                self.assertEqual(status.get("timing"), "unavailable")
+                self.assertFalse(root.findall(f".//{{{gps.MERGE_NS}}}media_time_us"))
+                self.assertEqual(len(root.findall(f".//{{{gps.GPX_NS}}}trkpt")),
+                                 len(seconds))
+                self.assertEqual([r.digest for r in native(path)],
+                                 [hashlib.sha256(raw_fix(i)).digest() for i in seconds])
+
+    def test_source_with_only_stale_fixes_keeps_an_empty_playback_segment(self):
+        first = source(self.root / "a.mp4", (-7, -1), deltas=(1000,) * 600)
+        second = source(self.root / "b.mp4", (600, 601),
+                        start=BASE + timedelta(seconds=600), deltas=(1000,) * 600)
+        plan = gps.prepare([first, second])
+        path = self.root / "merged.mp4"
+        output(path, plan.reserve_bytes, deltas=(1000,) * 1200)
+        root, status = marker(plan.embed_verify(path))
+        self.assertEqual(status.get("timing"), "media")
+        segments = root.findall(f".//{{{gps.GPX_NS}}}trkseg")
+        self.assertEqual([len(segment) for segment in segments], [0, 2])
+        times = root.findall(f".//{{{gps.MERGE_NS}}}media_time_us")
+        self.assertEqual([int(t.text) for t in times], [600000000, 601000000])
+        self.assertEqual([r.digest for r in native(path)],
+                         [hashlib.sha256(raw_fix(i)).digest() for i in (-7, -1, 600, 601)])
 
     def test_qualified_gpx_normalizes_leading_and_repeated_seconds_only(self):
         seconds = (-1, 0, 1, 1, 2)

@@ -186,9 +186,13 @@ Timing uses the actual concatenation durations and qualified source capture
 clocks. Set `TZ` to the camera's timezone. Uncertain clocks retain their route
 and original UTC times but are explicitly marked as having unavailable media
 timing. A viewer must not guess synchronized positions from those timestamps.
-Qualified playback GPX omits fixes just before a clip starts and keeps the first
-fix for a repeated GPS second or shared media boundary. Every original native
-GPS record remains embedded unchanged, including those omitted from timed GPX.
+Qualified playback GPX includes fixes only within each source video interval,
+including its exact start and end; stale leading or trailing fixes are omitted,
+not clamped to an endpoint. It keeps the first fix for a repeated GPS second or
+shared media boundary. Backward GPS clocks still make timing unavailable, even
+if the backward fix is outside the video interval. If no eligible fix survives,
+the complete untimed route is retained. Every original native GPS record remains
+embedded unchanged, including those omitted from timed GPX.
 Parking files remain unmerged. Existing merged files are left untouched;
 GPS already lost from deleted originals cannot be recovered by enabling this
 option.
