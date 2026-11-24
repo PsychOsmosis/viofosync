@@ -1238,11 +1238,14 @@ def merge_recording_group(group, merged_destination,
                         f"duration {gps_plan.concat_durations[index]}\n"
                     )
 
-        command = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error",
+        command = ["ffmpeg", "-hide_banner", "-loglevel", "error"]
+        require_complete_copy = gps_plan is not None and gps_plan.requires_complete_copy
+        if require_complete_copy:
+            command.extend(["-fflags", "+discardcorrupt"])
+        command.extend([
             "-y", "-f", "concat", "-safe", "0",
             "-i", list_path, "-c", "copy",
-        ]
+        ])
         if gps_plan is not None:
             command.extend(["-moov_size", str(gps_plan.reserve_bytes)])
         command.append(tmp_output)
@@ -1252,7 +1255,7 @@ def merge_recording_group(group, merged_destination,
             text=True,
             check=False,
         )
-        if result.returncode != 0:
+        if result.returncode != 0 or (require_complete_copy and result.stderr.strip()):
             logger.error(
                 f"Failed to merge into {output_path}: "
                 f"{result.stderr.strip()}"
