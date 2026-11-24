@@ -41,6 +41,10 @@ class _TimingUnavailable(Exception):
     pass
 
 
+class _InvalidBoxLength(MergeGPSError):
+    pass
+
+
 def _identity(info):
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
             info.st_ctime_ns)
@@ -88,7 +92,7 @@ def _file_boxes(fd, end):
         elif length == 0:
             length = end - offset
         if length < header or offset + length > end:
-            raise MergeGPSError("Invalid MP4 box length")
+            raise _InvalidBoxLength("Invalid MP4 box length")
         yield offset, length, kind, header
         offset += length
 
@@ -126,6 +130,11 @@ def _one(data, kind, *, optional=False):
 
 def _moov(fd, size):
     boxes = list(_file_boxes(fd, size))
+    movie, moov = _movie_box(fd, size, boxes)
+    return boxes, movie, moov
+
+
+def _movie_box(fd, size, boxes):
     if any(kind in (b"moof", b"mfra") for _, _, kind, _ in boxes):
         raise MergeGPSError("Fragmented MP4 GPS merging is unsupported")
     movies = [box for box in boxes if box[2] == b"moov"]
@@ -134,7 +143,35 @@ def _moov(fd, size):
     position, length, _, header = movies[0]
     if length > _MAX_MOOV:
         raise MergeGPSError("MP4 movie metadata exceeds the supported limit")
-    return boxes, movies[0], _read(fd, position + header, length - header, size)
+    return movies[0], _read(fd, position + header, length - header, size)
+
+
+def _sample_count(table):
+    sizes = _one(table, b"stsz")
+    if len(sizes) < 12:
+        raise _TimingUnavailable()
+    sample_size, count = struct.unpack_from(">II", sizes, 4)
+    if len(sizes) != (12 if sample_size else 12 + 4 * count) or not 0 < count <= _MAX_SAMPLES:
+        raise _TimingUnavailable()
+    return count
+
+
+def _av_sample_counts(moov):
+    """Count samples for the ordinary single-video, optional-audio layout."""
+    counts = {}
+    try:
+        for kind, track in _boxes(moov):
+            if kind != b"trak":
+                continue
+            media = _one(track, b"mdia")
+            handler = _one(media, b"hdlr")
+            stream = handler[8:12]
+            if stream not in (b"vide", b"soun") or stream in counts:
+                return None
+            counts[stream] = _sample_count(_one(_one(media, b"minf"), b"stbl"))
+    except (_TimingUnavailable, MergeGPSError):
+        return None
+    return counts if b"vide" in counts else None
 
 
 def _clock_header(data):
@@ -179,13 +216,7 @@ def _video(moov):
         track, media = tracks[0]
         scale, duration = _clock_header(_one(media, b"mdhd"))
         table = _one(_one(media, b"minf"), b"stbl")
-        sizes = _one(table, b"stsz")
-        if len(sizes) < 12:
-            raise _TimingUnavailable()
-        sample_size, sample_count = struct.unpack_from(">II", sizes, 4)
-        expected_sizes_length = 12 if sample_size else 12 + 4 * sample_count
-        if len(sizes) != expected_sizes_length or not 0 < sample_count <= _MAX_SAMPLES:
-            raise _TimingUnavailable()
+        sample_count = _sample_count(table)
         stts = _one(table, b"stts")
         if len(stts) < 8 or len(stts) != 8 + 8 * struct.unpack_from(">I", stts, 4)[0]:
             raise _TimingUnavailable()
@@ -349,6 +380,31 @@ def _native(fd, size, moov):
     return index[:4], tuple(records)
 
 
+def _source_metadata(fd, size):
+    boxes = []
+    try:
+        # Keep the successfully parsed prefix if a later box length is invalid.
+        boxes.extend(_file_boxes(fd, size))
+    except _InvalidBoxLength:
+        # Some VIOFO clips understate the size of their final 64-bit mdat.
+        # Require the camera layout and an intact native record in the tail.
+        # Do not apply this interpretation to a merge output.
+        if ([box[2] for box in boxes] != [b"ftyp", b"skip", b"moov", b"skip", b"mdat"]
+                or boxes[-1][3] != 16 or boxes[0][1] < 16
+                or _read(fd, boxes[0][3], 4, size) != b"mp42"):
+            raise
+        movie, moov = _movie_box(fd, size, boxes)
+        flags, records = _native(fd, size, moov)
+        tail = boxes[-1][0] + boxes[-1][1]
+        if (not any(record.position >= tail for record in records)
+                or any(kind == b"mvex" for kind, _ in _boxes(moov))):
+            raise
+        return movie, moov, flags, records, True
+    movie, moov = _movie_box(fd, size, boxes)
+    flags, records = _native(fd, size, moov)
+    return movie, moov, flags, records, False
+
+
 def _duration(path):
     try:
         result = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
@@ -375,11 +431,13 @@ def _box(kind, payload):
 class MergeGPSPlan:
     """Prepared source identities, bounded native metadata and concat durations."""
 
-    def __init__(self, sources, durations, reserve_bytes, flags):
+    def __init__(self, sources, durations, reserve_bytes, flags, expected_samples):
         self.sources = tuple(sources)
         self.concat_durations = tuple(durations)
         self.reserve_bytes = reserve_bytes
+        self.requires_complete_copy = expected_samples is not None
         self._flags = flags
+        self._expected_samples = expected_samples
 
     def _assert_sources(self):
         for source in self.sources:
@@ -490,6 +548,9 @@ class MergeGPSPlan:
         try:
             size = os.fstat(fd).st_size
             boxes, movie, moov = _moov(fd, size)
+            if (self.requires_complete_copy
+                    and _av_sample_counts(moov) != self._expected_samples):
+                raise MergeGPSError("Merged sample counts do not match the sources")
             if any(kind == b"gps " or kind == b"uuid" and payload[:16] == GPS_UUID
                    for kind, payload in _boxes(moov)):
                 raise MergeGPSError("Merged output already contains GPS metadata")
@@ -569,6 +630,8 @@ def prepare(group):
     count = 0
     total_bytes = 0
     total_samples = 0
+    sample_counts = []
+    recovered_mdat = False
     if len(group) > 256:
         raise MergeGPSError("Too many GPS merge sources")
     if not group:
@@ -577,8 +640,9 @@ def prepare(group):
         fd = _open(recording.filepath)
         try:
             before = _identity(os.fstat(fd))
-            _, movie, moov = _moov(fd, before[2])
-            source_flags, records = _native(fd, before[2], moov)
+            movie, moov, source_flags, records, short_mdat = _source_metadata(fd, before[2])
+            recovered_mdat |= short_mdat
+            sample_counts.append(_av_sample_counts(moov))
             if source_flags is not None:
                 if flags is not None and flags != source_flags:
                     raise MergeGPSError("Incompatible native GPS index versions")
@@ -605,4 +669,12 @@ def prepare(group):
     reserve += total_bytes + 16 + 8 * count + 24 + _MAX_GPX + 8
     if reserve >= 0x7fffffff:
         raise MergeGPSError("The GPS reservation exceeds the muxer limit")
-    return MergeGPSPlan(sources, durations, reserve, flags or bytes(4))
+    expected_samples = None
+    if recovered_mdat:
+        tracks = sample_counts[0]
+        if tracks is None or any(counts is None or counts.keys() != tracks.keys()
+                                 for counts in sample_counts):
+            raise MergeGPSError("Cannot verify sample counts for sources with a short mdat")
+        expected_samples = {track: sum(counts[track] for counts in sample_counts)
+                            for track in tracks}
+    return MergeGPSPlan(sources, durations, reserve, flags or bytes(4), expected_samples)

@@ -199,6 +199,11 @@ The merge verifies the embedded index and GPS records before publishing the
 output or deleting sources with `DELETE_MERGED_SOURCES=1`. If GPS metadata
 is malformed, incomplete, cannot fit safely, or cannot be written and
 verified, that merge is skipped and its source videos and sidecars are kept.
+Some VIOFO clips understate the length of their final media box. The merge
+accepts that source layout when the native GPS index proves a record exists
+past the declared boundary, FFmpeg copies without errors, and the output
+contains the full audio and video sample counts. Merged outputs still require
+valid MP4 box lengths.
 Clips without GPS can still merge; they do not acquire invented positions.
 Supported bounds are 256 source clips, 12,000 native GPS records, 512 MiB of
 native GPS data and 2 MiB of merged GPX. Groups exceeding these limits keep

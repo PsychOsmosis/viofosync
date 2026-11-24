@@ -105,7 +105,7 @@ class MergeWorkflowTests(unittest.TestCase):
         self.gpx = Path(str(self.output) + ".gpx")
         self.plan = types.SimpleNamespace(
             reserve_bytes=65536, concat_durations=("1.000000", "1.000000"),
-            embed_verify=mock.Mock(side_effect=self.embed),
+            embed_verify=mock.Mock(side_effect=self.embed), requires_complete_copy=False,
         )
         self.gps_module = types.SimpleNamespace(prepare=mock.Mock(return_value=self.plan))
         self.ffmpeg = mock.Mock(side_effect=self.concat)
@@ -244,6 +244,21 @@ class MergeWorkflowTests(unittest.TestCase):
         self.assert_sources_preserved()
         self.assertFalse(self.output.exists())
         self.assertFalse(self.gpx.exists())
+        self.assert_no_work_files()
+
+    def test_short_mdat_copy_rejects_reported_errors_even_on_success_exit(self):
+        self.plan.requires_complete_copy = True
+
+        def copy_with_error(command, **kwargs):
+            self.concat(command, **kwargs)
+            return subprocess.CompletedProcess(command, 0, "", "synthetic input error")
+
+        self.ffmpeg.side_effect = copy_with_error
+        self.assertFalse(self.merge())
+        self.assertIn("+discardcorrupt", self.command)
+        self.plan.embed_verify.assert_not_called()
+        self.assert_sources_preserved()
+        self.assertFalse(self.output.exists())
         self.assert_no_work_files()
 
     def test_gpx_publication_failure_keeps_sources_and_removes_temporary_files(self):

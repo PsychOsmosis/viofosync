@@ -56,6 +56,24 @@ def source(path, seconds=(0, 1), *, start=BASE, deltas=(1000, 1000), mode="norma
     return SimpleNamespace(filepath=str(path), datetime=start, mode=mode, duration=2.0)
 
 
+def short_mdat_source(path, *, brand=b"mp42", index_tail=True):
+    ftyp = B(b"ftyp", brand + bytes(4) + b"isomavc1mp42")
+    skip = B(b"skip", bytes(8))
+    records = [raw_fix(0), raw_fix(1)]
+    tail_media = bytes([255]) * 16
+    count = 2 if index_tail else 1
+    placeholders = B(b"gps ", struct.pack(">II", 0, count) + bytes(8 * count))
+    first_position = len(ftyp + skip + movie(extra=placeholders) + skip) + 16
+    second_position = first_position + len(records[0]) + len(tail_media)
+    entries = list(zip((first_position, second_position), map(len, records)))
+    index = B(b"gps ", struct.pack(">II", 0, count)
+              + b"".join(struct.pack(">II", *entry) for entry in entries[:count]))
+    header = struct.pack(">I4sQ", 1, b"mdat", 16 + len(records[0]))
+    path.write_bytes(ftyp + skip + movie(extra=index) + skip + header
+                     + records[0] + tail_media + records[1])
+    return SimpleNamespace(filepath=str(path), datetime=BASE, mode="normal")
+
+
 def output(path, reserve, *, deltas=(1000, 1000), sparse=False, composition=None):
     ftyp = B(b"ftyp", b"isom" + bytes(4))
     moov = movie(deltas, composition=composition)
@@ -180,6 +198,46 @@ class MergeGPSMetadataTests(unittest.TestCase):
                 path.write_bytes(data)
                 with self.assertRaises(gps.MergeGPSError):
                     gps.prepare([recording])
+
+    def test_viofo_short_mdat_preserves_records_on_both_sides_of_the_boundary(self):
+        path = self.root / "short-mdat.mp4"
+        recording = short_mdat_source(path)
+        before = path.read_bytes()
+        # Only source preparation may accept this layout.
+        with self.assertRaisesRegex(gps.MergeGPSError, "Invalid MP4 box length"):
+            native(path)
+        plan = gps.prepare([recording])
+        merged = self.root / "merged.mp4"
+        output(merged, plan.reserve_bytes)
+        self.assertIsNotNone(plan.embed_verify(merged))
+        self.assertEqual([r.digest for r in native(merged)],
+                         [hashlib.sha256(raw_fix(i)).digest() for i in (0, 1)])
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_short_mdat_requires_viofo_layout_and_an_intact_indexed_tail_record(self):
+        for defect in ("brand", "unindexed", "truncated"):
+            with self.subTest(defect=defect):
+                path = self.root / "short-mdat.mp4"
+                recording = short_mdat_source(
+                    path, brand=b"isom" if defect == "brand" else b"mp42",
+                    index_tail=(defect != "unindexed"),
+                )
+                if defect == "truncated":
+                    path.write_bytes(path.read_bytes()[:-1])
+                with self.assertRaises(gps.MergeGPSError):
+                    gps.prepare([recording])
+
+    def test_short_mdat_refuses_output_with_missing_samples_before_embedding(self):
+        first = short_mdat_source(self.root / "short-mdat.mp4")
+        second = source(self.root / "normal.mp4", (2, 3),
+                        start=BASE + timedelta(seconds=2))
+        plan = gps.prepare([first, second])
+        merged = self.root / "merged.mp4"
+        output(merged, plan.reserve_bytes, deltas=(1000, 1000, 1000))
+        before = merged.read_bytes()
+        with self.assertRaisesRegex(gps.MergeGPSError, "sample counts"):
+            plan.embed_verify(merged)
+        self.assertEqual(merged.read_bytes(), before)
 
     def test_source_identity_change_aborts_before_touching_output(self):
         recording = source(self.root / "a.mp4")
